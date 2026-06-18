@@ -1,4 +1,6 @@
+import logging
 import os
+
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_tavily import TavilySearch
@@ -6,6 +8,8 @@ from langchain_groq import ChatGroq
 from state import AgentState
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+
+logger = logging.getLogger(__name__)
 
 # Load local .env only for local development
 load_dotenv()
@@ -16,8 +20,11 @@ def get_api_key(key_name):
     try:
         if key_name in st.secrets:
             return st.secrets[key_name]
-    except Exception:
+    except FileNotFoundError:
+        # No secrets.toml file exists — expected in local development
         pass
+    except Exception as exc:
+        logger.warning("Unexpected error reading Streamlit secret '%s': %s", key_name, exc)
     # Fallback to environment variables
     return os.getenv(key_name)
 
@@ -43,42 +50,77 @@ search_tool = TavilySearch(max_results=3, tavily_api_key=TAVILY_API_KEY)
 
 # --- Agent Functions ---
 def macro_intelligence_agent(state: AgentState):
-    # Dynamically grab the user's input
     topic = state.get("search_topic") or "current macroeconomic news impact on global markets"
-    print(f"--- FETCHING LIVE DATA FOR: {topic} ---")
-    
-    # Corrected parsing logic
-    search_results = search_tool.invoke({"query": topic})
-    
+    logger.info("Fetching live data for: %s", topic)
+
+    try:
+        search_results = search_tool.invoke({"query": topic})
+    except Exception as exc:
+        error_msg = f"Tavily search failed for '{topic}': {exc}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from exc
+
     if isinstance(search_results, dict) and "results" in search_results:
         results_list = search_results["results"]
         content_list = [res.get('content', '') for res in results_list if isinstance(res, dict)]
     else:
         content_list = [str(search_results)]
-    
+
+    macro_data = "\n\n".join(content_list)
+    if not macro_data.strip():
+        logger.warning("Search returned empty results for: %s", topic)
+
     return {
-        "macro_data": "\n\n".join(content_list), 
+        "macro_data": macro_data,
         "decision_log": [f"Macro Agent successfully fetched market data for: {topic}"]
     }
 
 def market_strategy_agent(state: AgentState):
-    print("--- GENERATING STRATEGY ---")
-    prompt = f"Analyze this macroeconomic data and suggest an investment strategy: {state['macro_data']}"
-    response = llm.invoke(prompt)
+    logger.info("Generating strategy")
+    macro_data = state.get("macro_data", "")
+    if not macro_data.strip():
+        raise ValueError("Cannot generate strategy: macro data is empty")
+
+    prompt = f"Analyze this macroeconomic data and suggest an investment strategy: {macro_data}"
+    try:
+        response = llm.invoke(prompt)
+    except Exception as exc:
+        error_msg = f"LLM call failed in strategy agent: {exc}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from exc
+
     return {"proposed_strategy": response.content, "decision_log": ["Strategy Agent analyzed macro trends and proposed a plan."]}
 
 def confidence_agent(state: AgentState):
-    print("--- CALCULATING CONFIDENCE SCORE ---")
-    strategy = state["proposed_strategy"]
+    logger.info("Calculating confidence score")
+    strategy = state.get("proposed_strategy", "")
+    if not strategy.strip():
+        raise ValueError("Cannot calculate confidence: proposed strategy is empty")
+
     prompt = f"Assign a confidence score (0-100) and reasoning for this strategy: {strategy}. Return ONLY JSON."
-    score_response = llm.invoke(prompt)
+    try:
+        score_response = llm.invoke(prompt)
+    except Exception as exc:
+        error_msg = f"LLM call failed in confidence agent: {exc}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from exc
+
     return {"audit_result": f"Confidence Score Report: {score_response.content}"}
 
 def auditor_agent(state: AgentState):
-    print("--- RUNNING FORMAL COMPLIANCE AUDIT ---")
-    strategy = state["proposed_strategy"]
+    logger.info("Running formal compliance audit")
+    strategy = state.get("proposed_strategy", "")
+    if not strategy.strip():
+        raise ValueError("Cannot audit: proposed strategy is empty")
+
     audit_prompt = f"Review this strategy against policies {INVESTMENT_POLICY}: {strategy}. State APPROVED or REJECTED."
-    audit_decision = llm.invoke(audit_prompt)
+    try:
+        audit_decision = llm.invoke(audit_prompt)
+    except Exception as exc:
+        error_msg = f"LLM call failed in auditor agent: {exc}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from exc
+
     return {"audit_result": audit_decision.content, "decision_log": ["Auditor Agent completed formal policy compliance check."]}
 
 # --- Graph Setup ---
